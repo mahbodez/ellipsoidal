@@ -1,0 +1,22 @@
+# pycache files
+__pycache__/
+*.py[cod]
+# Cython debug symbols
+cython_debug/
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+eggs-info/
+lib/
+lib64/
+# large files
+*.csv
+*.tsv
+*.xlsx
+# Jupyter Notebook checkpoints
+.checkpoint
+*.ipynb
