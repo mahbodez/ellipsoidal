@@ -45,8 +45,8 @@ installed, set `backend='torch'` to get GPU, batching and autograd support.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Dict, Tuple, Union, Optional
+from dataclasses import dataclass, asdict, field
+from typing import Dict, List, Tuple, Union, Optional
 import numpy as np
 
 try:
@@ -72,17 +72,18 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Data containers
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
+@dataclass
 class TransformMeta:
     """All parameters required for an inverse transform."""
 
-    orig_shape: Tuple[int, int, int]
-    center: Tuple[float, float, float]
-    semi_axes: Tuple[float, float, float]
+    orig_shape: List[int, int, int]
+    center: List[float, float, float]
+    semi_axes: List[float, float, float]
     rotation: np.ndarray  # shape (3, 3)
     r_bins: int
     theta_bins: int
     phi_bins: int
+    affine: np.ndarray = field(default_factory=lambda: np.eye(4))
     equal_area_phi: bool = True
     backend: str = "scipy"  # "scipy" | "torch"
 
@@ -90,12 +91,22 @@ class TransformMeta:
     def asdict(self) -> Dict:
         d = asdict(self)
         d["rotation"] = self.rotation.tolist()
+        d["affine"] = self.affine.tolist()
+
+        d["orig_shape"] = list(self.orig_shape)
+        d["center"] = list(self.center)
+        d["semi_axes"] = list(self.semi_axes)
         return d
 
     @staticmethod
     def fromdict(d: Dict) -> "TransformMeta":
         d = dict(d)
         d["rotation"] = np.asarray(d["rotation"], dtype=np.float64)
+        d["affine"] = np.asarray(d["affine"], dtype=np.float32)
+
+        d["orig_shape"] = [int(el) for el in d["orig_shape"]]
+        d["center"] = [float(el) for el in d["center"]]
+        d["semi_axes"] = [float(el) for el in d["semi_axes"]]
         return TransformMeta(**d)  # type: ignore[arg‑type]
 
 
@@ -120,20 +131,35 @@ def _check_rotation(R: np.ndarray) -> np.ndarray:
     return R
 
 
+# ---------------------------------------------------------------------
+# clamp helper
+# ---------------------------------------------------------------------
+def _safe_index(idx: np.ndarray, size: int) -> np.ndarray:
+    """
+    Clamp indices into the open interval [-0.49, size-0.51].
+
+    map_coordinates treats values outside [-0.5, size-0.5] as out-of-bounds,
+    so we nudge everything 0.01 voxels inwards to stay safe.
+    """
+    lo, hi = -0.49, size - 0.51  # hi < size-0.5
+    return np.clip(idx, lo, hi, out=idx)
+
+
 # ---------------------------------------------------------------------------
 # Public API – PCA helper
 # ---------------------------------------------------------------------------
 
 
-def fit_ellipsoid(mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def fit_ellipsoid(mask: np.ndarray) -> dict:
     """Fit a *minimum bounding ellipsoid* to a binary mask via PCA.
 
     Returns
     -------
-    center : (3,) float64
-    semi_axes : (a, b, c)
+    A dictionary containing:
+    - center : (3,) float64
+    - semi_axes : (a, b, c)
         Half‑lengths along the principal axes, **in voxels**.
-    rotation : (3, 3) ndarray
+    - rotation : (3, 3) ndarray
         Orthonormal matrix whose *columns* are the principal axes.
     """
     if mask.dtype != np.bool_:
@@ -151,7 +177,12 @@ def fit_ellipsoid(mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
         rotation[:, 2] *= -1
     projections = centred @ rotation
     semi_axes = np.max(np.abs(projections), axis=0)
-    return center.astype(np.float64), semi_axes.astype(np.float64), rotation
+    results = {
+        "center": center.astype(np.float64),
+        "semi_axes": semi_axes.astype(np.float64),
+        "rotation": rotation,
+    }
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +191,11 @@ def fit_ellipsoid(mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
 def cartesian_to_ellipsoidal(
-    vol: Union[np.ndarray, "torch.Tensor"],
+    vol: Union[np.ndarray, torch.Tensor],
     *,
-    semi_axes: Tuple[float, float, float],
+    semi_axes: List[float, float, float],
     rotation: np.ndarray,
-    center: Tuple[float, float, float],
+    center: List[float, float, float],
     r_bins: int = 128,
     theta_bins: int = 384,
     phi_bins: int = 192,
@@ -189,9 +220,7 @@ def cartesian_to_ellipsoidal(
         PyTorch ≥ 2.0.
     """
     R = _check_rotation(rotation)
-    vol_np = (
-        vol.cpu().numpy() if isinstance(vol, np.ndarray.__mro__[1]) else np.asarray(vol)
-    )
+    vol_np = vol.cpu().numpy() if isinstance(vol, torch.Tensor) else np.asarray(vol)
     nx, ny, nz = vol_np.shape
 
     # latitude / longitude sampling ----------------------------------------
@@ -270,7 +299,7 @@ def ellipsoidal_to_cartesian(
     interp_order: int = 3,
 ) -> np.ndarray:
     """Reconstruct a Cartesian volume from an ellipsoidal one."""
-    if isinstance(ell, np.ndarray.__mro__[1]):
+    if isinstance(ell, torch.Tensor):
         ell_np = ell.cpu().numpy()
     else:
         ell_np = np.asarray(ell)
@@ -288,21 +317,22 @@ def ellipsoidal_to_cartesian(
     Xg, Yg, Zg = np.meshgrid(x, y, z, indexing="ij")
 
     Xw, Yw, Zw = Xg - cx, Yg - cy, Zg - cz
-    Xb = R[0, 0] * Xw + R[0, 1] * Yw + R[0, 2] * Zw
-    Yb = R[1, 0] * Xw + R[1, 1] * Yw + R[1, 2] * Zw
-    Zb = R[2, 0] * Xw + R[2, 1] * Yw + R[2, 2] * Zw
+    vec_world = np.stack([Xw, Yw, Zw], axis=-1)  # (...,3)
+    vec_body = vec_world @ R  # (...,3)
+    Xb, Yb, Zb = [vec_body[..., i] for i in range(3)]
 
     Xs, Ys, Zs = Xb / a, Yb / b, Zb / c
     r = np.sqrt(Xs**2 + Ys**2 + Zs**2)
     φ = np.arccos(np.clip(Zs / r, -1.0, 1.0))
     θ = np.mod(np.arctan2(Ys, Xs), 2.0 * np.pi)
 
-    r_idx = r * (Rb - 1)
+    r_idx = _safe_index(r * (Rb - 1), Rb)
     if meta.equal_area_phi:
-        φ_idx = (1.0 - np.cos(φ)) * Fb / 2.0 - 0.5
+        φ_idx = _safe_index((1.0 - np.cos(φ)) * Fb / 2.0 - 0.5, Fb)
     else:
-        φ_idx = φ * Fb / np.pi - 0.5
-    θ_idx = θ * Tb / (2.0 * np.pi) - 0.5
+        φ_idx = _safe_index(φ * Fb / np.pi - 0.5, Fb)
+
+    θ_idx = _safe_index(θ * Tb / (2.0 * np.pi) - 0.5, Tb)
 
     if meta.backend == "scipy":
         coords = np.vstack([r_idx.ravel(), φ_idx.ravel(), θ_idx.ravel()])
