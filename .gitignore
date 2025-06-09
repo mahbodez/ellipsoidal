@@ -22,3 +22,12 @@ lib64/
 *.ipynb
 *.nii
 *.nii.gz
+
+*.npy
+*.npz
+
+*.yaml
+*.yml
+*.json
+# macos files
+.DS_Store
