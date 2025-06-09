@@ -47,6 +47,7 @@ Copyright & Licence
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 import logging
@@ -68,6 +69,21 @@ try:  # optional N4 bias correction
     _HAVE_SITK = True
 except ModuleNotFoundError:
     _HAVE_SITK = False
+
+
+NiftiLike = nib.Nifti1Image | str | Path
+Nifti = nib.Nifti1Image
+
+
+def _load_niftilike(nii: NiftiLike) -> Nifti:
+    if isinstance(nii, str):
+        img = nib.load(nii)
+    elif isinstance(nii, Path):
+        img = nib.load(str(nii))
+    elif isinstance(nii, Nifti):
+        img = nii
+    return img
+
 
 # ---------------------------------------------------------------------------
 # Helper I/O
@@ -163,11 +179,12 @@ def _which(prog: str) -> Optional[str]:
     return shutil.which(prog)
 
 
-def brain_mask_bet(nifti: str | Path, *, frac: float = 0.4) -> np.ndarray:
+def brain_mask_bet(nifti: NiftiLike, *, frac: float = 0.4) -> np.ndarray:
     if _which("brainextractor") is None:
         raise RuntimeError("brainextractor not found in $PATH.")
     with tempfile.TemporaryDirectory() as tmp:
-        src = Path(nifti)
+        nii = _load_niftilike(nifti)
+        nib.save(nii, src := os.path.join(tmp, "src.nii.gz"))
         tmp_out = Path(tmp) / "bet_out.nii.gz"
         cmd = ["brainextractor", str(src), str(tmp_out), "-f", str(frac)]
         logger.info("Running brainextractor: %s", " ".join(cmd))
