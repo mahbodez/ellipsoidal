@@ -20,3 +20,5 @@ lib64/
 # Jupyter Notebook checkpoints
 .checkpoint
 *.ipynb
+*.nii
+*.nii.gz
