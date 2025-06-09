@@ -108,8 +108,8 @@ def gaussian_smooth(
 def enhance_mask(
     mask: np.ndarray,
     *,
-    dilate_mm: float = 2.0,
-    smooth_mm: float = 1.5,
+    dilate_mm: float = 3.0,
+    smooth_mm: float = 3.0,
     spacing: Tuple[float, float, float] | None = None,
 ) -> np.ndarray:
     """Expand *mask* outward then smooth jagged edges.
